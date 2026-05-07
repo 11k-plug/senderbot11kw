@@ -22,12 +22,19 @@ const path        = require('path');
 const TELEGRAM_TOKEN     = process.env.TELEGRAM_TOKEN     || '8718387604:AAG6ICLoEKoV96G4zCTMq_9cA0lKKmWrcvs';
 const AUTHORIZED_USER    = process.env.AUTHORIZED_USER    || 'K11000K';
 const MESSAGES_PER_CYCLE = 1500;
-const DELAY_PER_MSG      = 600;    // 600ms = 100 mensajes/min exactos
+const DELAY_MIN          = 4000;   // ms mínimo entre mensajes
+const DELAY_MAX          = 7000;   // ms máximo entre mensajes (~10-15 msg/min)
+const PAUSE_EVERY        = 25;     // pausa extra cada N mensajes
+const PAUSE_MINI_MIN     = 8000;   // ms mínimo pausa mini
+const PAUSE_MINI_MAX     = 18000;  // ms máximo pausa mini
 const SESSION_DIR        = './wa_session';
 const QR_MS              = 60000;
 const MAX_RECONN         = 5;
-const PROGRESS_EVERY     = 100;    // Notificar cada 100 mensajes
+const PROGRESS_EVERY     = 50;     // Notificar cada 50 mensajes
 const PAUSE_AFTER_CYCLE  = 2 * 60 * 60 * 1000; // 2 horas en ms
+
+// Caracteres invisibles para variar el mensaje (anti-spam)
+const INVISIBLE_CHARS = ['\u200B','\u200C','\u200D','\uFEFF','\u2060','\u180E','\u200E','\u200F'];
 // ─────────────────────────────────────────────────────────────────────────────
 
 const log = pino({ level: 'silent' });
@@ -80,6 +87,15 @@ function downloadText(url) {
       res.on('error', reject);
     });
   });
+}
+
+// Genera una variación del mensaje con caracteres invisibles únicos
+function spinMessage(text, index) {
+  const char = INVISIBLE_CHARS[index % INVISIBLE_CHARS.length];
+  const extra = INVISIBLE_CHARS[(index + 3) % INVISIBLE_CHARS.length];
+  // Inserta un carácter invisible al final y otro en el medio
+  const mid = Math.floor(text.length / 2);
+  return text.slice(0, mid) + char + text.slice(mid) + extra;
 }
 
 function hasCreds() {
@@ -359,8 +375,9 @@ async function runSendCycle(chatId) {
     const slice = contactList.slice(currentIndex, currentIndex + MESSAGES_PER_CYCLE);
     safeSend(chatId,
       `🚀 *Iniciando tanda:* ${slice.length} mensajes\n` +
-      `⚡ Velocidad: 100 mensajes/minuto\n` +
-      `⏱ Duración estimada: ~15 minutos\n` +
+      `⚡ Velocidad: ~10-15 mensajes/minuto (anti-ban)\n` +
+      `🛡️ Modo: delays aleatorios + variación de mensaje\n` +
+      `⏱ Duración estimada: ~100-150 minutos\n` +
       `🔔 Progreso cada ${PROGRESS_EVERY} mensajes`
     );
 
@@ -374,28 +391,42 @@ async function runSendCycle(chatId) {
         return;
       }
 
-      const raw = slice[i].trim().replace(/[\s\-\(\)]/g, '');
-      if (!raw) { currentIndex++; continue; }
+      const raw = slice[i].trim().replace(/[\+\s\-\(\)]/g, '');
+      if (!raw || raw.length < 7) { currentIndex++; continue; }
 
-      const jid = `${raw}@s.whatsapp.net`;
+      const jid     = `${raw}@s.whatsapp.net`;
+      const varMsg  = spinMessage(messageText, currentIndex); // Variación única por envío
       try {
-        await sock.sendMessage(jid, { text: messageText });
+        await sock.sendMessage(jid, { text: varMsg });
         sent++;
         currentIndex++;
-      } catch {
+      } catch (e) {
         errors++;
         currentIndex++;
+        // Si hay demasiados errores seguidos, pausa 30s (posible throttle de WA)
+        if (errors > 0 && errors % 10 === 0) {
+          safeSend(chatId, `⚠️ ${errors} errores acumulados. Pausando 30s para proteger la cuenta...`);
+          await sleep(30000);
+        }
       }
 
       // Notificar progreso cada PROGRESS_EVERY mensajes
       if (sent > 0 && sent % PROGRESS_EVERY === 0) {
         const elapsed = Math.round((Date.now() - startTime) / 1000);
+        const rate    = Math.round((sent / elapsed) * 60);
         safeSend(chatId,
-          `📊 Progreso: *${sent}/${slice.length}* enviados | ❌ ${errors} errores | ⏱ ${elapsed}s`
+          `📊 Progreso: *${sent}/${slice.length}* enviados | ❌ ${errors} errores | ⏱ ${elapsed}s | ⚡ ${rate} msg/min`
         );
       }
 
-      await sleep(DELAY_PER_MSG);
+      // Pausa extra cada PAUSE_EVERY mensajes (simula comportamiento humano)
+      if ((i + 1) % PAUSE_EVERY === 0 && i < slice.length - 1) {
+        const miniPause = randDelay(PAUSE_MINI_MIN, PAUSE_MINI_MAX);
+        await sleep(miniPause);
+      } else {
+        // Delay aleatorio normal entre mensajes
+        await sleep(randDelay(DELAY_MIN, DELAY_MAX));
+      }
     }
 
     // ── Tanda completada ──────────────────────────────────────────────────
@@ -498,8 +529,9 @@ bot.on('callback_query', async query => {
       safeSend(chatId,
         `✅ *Ciclo automático activado*\n` +
         `📋 Lista: ${contactList.length} contactos\n` +
-        `⚡ Velocidad: 100 mensajes/minuto\n` +
-        `⏱ Duración por tanda: ~15 minutos\n` +
+        `⚡ Velocidad: ~10-15 mensajes/minuto (anti-ban)\n` +
+        `🛡️ Delays aleatorios + variación de mensaje activos\n` +
+        `⏱ Duración por tanda: ~100-150 minutos\n` +
         `💤 Pausa entre tandas: 2 horas\n` +
         `🔔 Progreso cada ${PROGRESS_EVERY} mensajes\n\n` +
         `_Pulsa ⏹ Parar cuando quieras detener el ciclo_`
